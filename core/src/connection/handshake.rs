@@ -4,8 +4,8 @@ use byteorder::{BigEndian, ByteOrder, WriteBytesExt};
 use hmac::{Hmac, Mac};
 use protobuf::Message;
 use rand::RngCore;
-use rsa::{BigUint, Pkcs1v15Sign, RsaPublicKey};
-use sha1::{Digest, Sha1};
+use ring::signature::{RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY, RsaPublicKeyComponents};
+use sha1::Sha1;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::codec::{Decoder, Framed};
@@ -73,25 +73,7 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
         .to_owned();
 
     // Prevent man-in-the-middle attacks: check server signature
-    let n = BigUint::from_bytes_be(&SERVER_KEY);
-    let e = BigUint::new(vec![65537]);
-    let public_key = RsaPublicKey::new(n, e).map_err(|_| {
-        io::Error::new(
-            io::ErrorKind::InvalidData,
-            HandshakeError::VerificationFailed,
-        )
-    })?;
-
-    let hash = Sha1::digest(&remote_key);
-    let padding = Pkcs1v15Sign::new::<Sha1>();
-    public_key
-        .verify(padding, &hash, &remote_signature)
-        .map_err(|_| {
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                HandshakeError::VerificationFailed,
-            )
-        })?;
+    verify_server_signature(&remote_key, &remote_signature)?;
 
     // OK to proceed
     let shared_secret = local_keys.shared_secret(&remote_key);
@@ -101,6 +83,25 @@ pub async fn handshake<T: AsyncRead + AsyncWrite + Unpin>(
     client_response(&mut connection, challenge).await?;
 
     Ok(codec.framed(connection))
+}
+
+fn verify_server_signature(message: &[u8], signature: &[u8]) -> io::Result<()> {
+    const SERVER_EXPONENT: [u8; 3] = [1, 0, 1];
+    RsaPublicKeyComponents {
+        n: SERVER_KEY.as_slice(),
+        e: SERVER_EXPONENT.as_slice(),
+    }
+    .verify(
+        &RSA_PKCS1_2048_8192_SHA1_FOR_LEGACY_USE_ONLY,
+        message,
+        signature,
+    )
+    .map_err(|_| {
+        io::Error::new(
+            io::ErrorKind::InvalidData,
+            HandshakeError::VerificationFailed,
+        )
+    })
 }
 
 fn platform_for(os: &str, arch: &str) -> Platform {
@@ -276,8 +277,14 @@ fn compute_keys(shared_secret: &[u8], packets: &[u8]) -> io::Result<(Vec<u8>, Ve
 
 #[cfg(test)]
 mod tests {
-    use super::platform_for;
+    use super::{platform_for, verify_server_signature};
     use crate::protocol::keyexchange::Platform;
+
+    #[test]
+    fn server_signature_verification_rejects_invalid_signature() {
+        assert!(verify_server_signature(b"challenge", &[0; 256]).is_err());
+        assert!(verify_server_signature(b"challenge", &[]).is_err());
+    }
 
     #[test]
     fn windows_on_arm_uses_supported_desktop_platform() {

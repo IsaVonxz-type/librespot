@@ -816,9 +816,15 @@ where
                 let mut buf = Vec::new();
                 let mut current_element = String::new();
                 let mut user_attributes: UserAttributes = HashMap::new();
+                let mut xml_version = quick_xml::XmlVersion::Implicit1_0;
 
                 loop {
                     match reader.read_event_into(&mut buf) {
+                        Ok(Event::Decl(ref declaration)) => {
+                            if let Ok(version) = declaration.xml_version() {
+                                xml_version = version;
+                            }
+                        }
                         Ok(Event::Start(ref element)) => {
                             std::str::from_utf8(element)?.clone_into(&mut current_element)
                         }
@@ -829,7 +835,7 @@ where
                             if !current_element.is_empty() {
                                 let _ = user_attributes.insert(
                                     current_element.clone(),
-                                    value.xml_content()?.to_string(),
+                                    value.xml_content(xml_version)?.to_string(),
                                 );
                             }
                         }
